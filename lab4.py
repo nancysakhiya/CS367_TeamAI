@@ -1,87 +1,141 @@
 import numpy as np
 import random
-from math import sin, cos, sqrt, atan2, radians
+import matplotlib.pyplot as plt
 
-# Function to calculate the Haversine distance between two points
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371  # Earth's radius in km
-    dLat = radians(lat2 - lat1)
-    dLon = radians(lon2 - lon1)
-    a = sin(dLat / 2) * sin(dLat / 2) + cos(radians(lat1)) * cos(radians(lat2)) * sin(dLon / 2) * sin(dLon / 2)
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    return R * c
+# =========================
+# Load the scrambled image from Octave text-based .mat
+# =========================
+filename = "scrambled_lena.mat"
 
-# Function to calculate the objective function (total cost of the tour)
-def objective_function(tour, distances):
-    total_cost = 0
-    for i in range(len(tour) - 1):
-        total_cost += distances[tour[i]][tour[i + 1]]
-    total_cost += distances[tour[-1]][tour[0]]  # Add the cost of returning to the starting city
-    return total_cost
+with open(filename, 'r') as f:
+    lines = f.readlines()
 
-# Function to generate a random solution for the TSP
-def generate_random_solution(num_cities):
-    tour = list(range(num_cities))
-    random.shuffle(tour)
-    return tour
+# Remove empty lines and strip spaces
+lines = [line.strip() for line in lines if line.strip()]
 
-# Function to generate a new solution by swapping two cities in the tour
-def generate_new_solution(old_solution):
-    new_solution = old_solution.copy()
-    i, j = random.sample(range(len(new_solution)), 2)
-    new_solution[i], new_solution[j] = new_solution[j], new_solution[i]
-    return new_solution
+# Find the line with dimensions (first line that has exactly two numbers)
+for idx, line in enumerate(lines):
+    if len(line.split()) == 2 and all(s.isdigit() for s in line.split()):
+        rows, cols = map(int, line.split())
+        dim_index = idx
+        break
 
-# Function to implement the Simulated Annealing algorithm
-def simulated_annealing(distances, num_cities, num_iterations, initial_temperature, cooling_rate):
-    current_solution = generate_random_solution(num_cities)
-    current_cost = objective_function(current_solution, distances)
-    best_solution = current_solution
-    best_cost = current_cost
-    temperature = initial_temperature
+# All lines after the dimension line are pixel values
+data_lines = lines[dim_index + 1:]
 
-    for iteration in range(num_iterations):
-        new_solution = generate_new_solution(current_solution)
-        new_cost = objective_function(new_solution, distances)
+# Convert all remaining lines to integers
+data_numbers = [int(line) for line in data_lines]
 
-        if new_cost < current_cost:
-            current_solution = new_solution
-            current_cost = new_cost
+# Reshape into 2D array
+image_data = np.array(data_numbers, dtype=np.uint8).reshape(rows, cols)
 
-            if new_cost < best_cost:
-                best_solution = new_solution
-                best_cost = new_cost
+# =========================
+# Downscale the image for faster computation
+# =========================
+scale_factor = 4  # reduce size (128x128)
+image_data = image_data[::scale_factor, ::scale_factor]
 
-        else:
-            if random.random() < np.exp(-(new_cost - current_cost) / temperature):
-                current_solution = new_solution
-                current_cost = new_cost
-        temperature *= cooling_rate
+# =========================
+# Puzzle parameters
+# =========================
+TILE_COUNT = 9  # 3x3 puzzle
+START_TEMP = 500
+TEMP_DECAY = 0.95
+ITERATION_LIMIT = 1000
 
-    return best_solution, best_cost
+# =========================
+# Utility functions
+# =========================
+def show_image(image, title="Image"):
+    plt.imshow(image, cmap='gray')
+    plt.title(title)
+    plt.axis('off')
+    plt.show()
 
+def cut_image_into_tiles(image, num_tiles):
+    height, width = image.shape
+    tile_height, tile_width = height // num_tiles, width // num_tiles
+    return [image[i * tile_height:(i + 1) * tile_height, j * tile_width:(j + 1) * tile_width]
+            for i in range(num_tiles) for j in range(num_tiles)]
 
-# Load the coordinates of the 20 important tourist locations in Rajasthan
-coordinates = np.loadtxt('coordinate.txt', delimiter=',')
+def reconstruct_image(arrangement, pieces, num_tiles):
+    tile_height, tile_width = pieces[0].shape
+    reconstructed_image = np.zeros((tile_height * num_tiles, tile_width * num_tiles), dtype=pieces[0].dtype)
+    for row in range(num_tiles):
+        for col in range(num_tiles):
+            reconstructed_image[row*tile_height:(row+1)*tile_height,
+                                col*tile_width:(col+1)*tile_width] = pieces[arrangement[row*num_tiles + col]]
+    return reconstructed_image
 
-# Calculate the pairwise distances between these locations using the Haversine formula
-distances = np.zeros((20, 20))
+# =========================
+# Vectorized fitness function
+# =========================
+def evaluate_puzzle_fitness(arrangement, pieces):
+    """Compute fitness using only edge pixels (vectorized for speed)."""
+    grid_size = int(np.sqrt(len(pieces)))
+    fitness = 0
 
-for i in range(20):
-    for j in range(i + 1, 20):
-        distances[i][j] = haversine(coordinates[i][0], coordinates[i][1], coordinates[j][0], coordinates[j][1])
+    # Precompute top, bottom, left, right edges
+    top_edges = np.array([pieces[i][0, ::5] for i in range(len(pieces))])
+    bottom_edges = np.array([pieces[i][-1, ::5] for i in range(len(pieces))])
+    left_edges = np.array([pieces[i][::5, 0] for i in range(len(pieces))])
+    right_edges = np.array([pieces[i][::5, -1] for i in range(len(pieces))])
 
-# Apply Simulated Annealing
-initial_temperature = 1000
-num_iterations = 10000
-cooling_rate = 0.95
-best_solution, best_cost = simulated_annealing(distances, 20, num_iterations, initial_temperature, cooling_rate)
+    # Compare top-bottom edges
+    for row in range(1, grid_size):
+        for col in range(grid_size):
+            curr = arrangement[row * grid_size + col]
+            above = arrangement[(row-1) * grid_size + col]
+            fitness += np.sum(np.abs(top_edges[curr] - bottom_edges[above]))
 
-# Print the optimal tour
-print("Optimal Tour:")
+    # Compare left-right edges
+    for row in range(grid_size):
+        for col in range(1, grid_size):
+            curr = arrangement[row * grid_size + col]
+            left = arrangement[row * grid_size + (col-1)]
+            fitness += np.sum(np.abs(left_edges[curr] - right_edges[left]))
 
-for city in best_solution:
-    print(city)
+    return fitness
 
-# Print the total cost of the optimal tour
-print("Total Cost: ", best_cost)
+def swap_random_tiles(arrangement):
+    new_arr = arrangement.copy()
+    a, b = random.sample(range(len(arrangement)), 2)
+    new_arr[a], new_arr[b] = new_arr[b], new_arr[a]
+    return new_arr
+
+def optimize_puzzle_arrangement(pieces):
+    current_state = list(range(len(pieces)))
+    current_fitness = evaluate_puzzle_fitness(current_state, pieces)
+    temperature = START_TEMP
+
+    for step in range(ITERATION_LIMIT):
+        new_state = swap_random_tiles(current_state)
+        new_fitness = evaluate_puzzle_fitness(new_state, pieces)
+
+        if new_fitness < current_fitness or random.random() < np.exp((current_fitness - new_fitness) / temperature):
+            current_state = new_state
+            current_fitness = new_fitness
+
+        temperature *= TEMP_DECAY
+
+        if step % 100 == 0:
+            print(f"Step {step}, Fitness: {current_fitness}, Temp: {temperature}")
+
+        if current_fitness == 0:
+            break
+
+    return current_state
+
+# =========================
+# Main
+# =========================
+if __name__ == "__main__":
+    show_image(image_data, "Scrambled Puzzle")
+
+    grid_size = int(np.sqrt(TILE_COUNT))
+    puzzle_tiles = cut_image_into_tiles(image_data, grid_size)
+
+    final_order = optimize_puzzle_arrangement(puzzle_tiles)
+    solved_image = reconstruct_image(final_order, puzzle_tiles, grid_size)
+
+    show_image(solved_image, "Solved Puzzle")
